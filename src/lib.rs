@@ -1,90 +1,122 @@
-#![allow(dead_code, unused_imports, unused_macros, unused_variables)]
-use std::num::ParseIntError;
-use std::result;
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
-use std::io;
-use std::num;
+#![allow(dead_code, unused_macros, unused_variables)]
+use std::path::{Path, PathBuf};
+use ini::{self};
+#[macro_use] extern crate failure;
+use failure::Error;
 
-// We derive `Debug` because all types should probably derive `Debug`.
-// This gives us a reasonable human readable description of `CliError` values.
-#[derive(Debug)]
-pub enum CliError {
-    Io(io::Error),
-    Parse(num::ParseIntError),
+// type Result<T> = std::result::Result<T, MyError>;
+
+#[derive(Debug, Fail)]
+pub enum MyError {
+    #[fail(display = "'configuration' section not found on file: {:?}", file)]
+    ConfigNotFound {
+        file: PathBuf,
+    },
+    #[fail(display = "Key '{}' not found on file: {:?}", key, file)]
+    KeyNotFound {
+        key: String,
+        file: PathBuf,
+    },
+    #[fail(display = "ini parser error: {}", _0)]
+    Parse(#[fail(cause)] ini::ini::Error),
 }
 
+#[derive(Debug, Clone)]
+pub struct Repository {
 
-fn file_double<P: AsRef<Path>>(file_path: P) -> Result<i32, CliError> {
-
-    let mut file = File::open(file_path).map_err(CliError::Io)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(CliError::Io)?;
-    let n: i32 = contents.trim().parse().map_err(CliError::Parse)?;
-    Ok(2 * n)
+    pub name: String,
+    pub url: String,
 }
 
+pub fn from_file(filepath: &Path) -> Result<Repository, Error> {
 
-fn double_number(number_str: &str) -> Result<i32, ParseIntError> {
-    number_str.parse::<i32>().map(|n| 2 * n)
+    let ini_content = ini::Ini::load_from_file(filepath)?;
+    let config = ini_content.section(Some("configuration"))
+        .ok_or(MyError::ConfigNotFound { file: filepath.to_owned() })?;
+    let url = config.get("url")
+        .ok_or(MyError::KeyNotFound { file: filepath.to_owned(), key: String::from("url") })?;
+    Ok(Repository {
+        name: String::from("algo"),
+        url: String::from(url),
+    })
 }
 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use tempfile::NamedTempFile;
-    use std::io::{self, Write, Read};
-    use std::path::Path;
+    use std::io::Write;
 
     #[test]
-    fn it_works() {
+    fn one_result() {
 
-        assert_eq!(super::double_number("2"), Ok(4));
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[Globals]
+
+[configuration]
+url         = http://tttechsvn.vie.at.tttech.ttt
+access      = svn
+variable    = SVNROOT
+layout      = tbtn
+responsible = MSF
+").unwrap();
+        let repository = from_file(file.path()).unwrap();
+        assert_eq!(repository.url, "http://tttechsvn.vie.at.tttech.ttt");
     }
 
     #[test]
-    fn it_works_again() {
+    fn fail_parse() {
 
-        match super::double_number("10") {
-            Ok(n) => assert_eq!(n, 20),
-            Err(err) => panic!("Test error")
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[Globals
+
+url         = http://tttechsvn.vie.at.tttech.ttt
+access      = svn
+variable    = SVNROOT
+layout      = tbtn
+responsible = MSF
+").unwrap();
+        let repository = from_file(file.path()).err();
+        if let Some(err) = repository {
+            assert!(err.to_string().starts_with("7:0 Expecting"));
         }
     }
 
     #[test]
-    fn file_double() {
-        let mut file1 = NamedTempFile::new().unwrap();
-        let text = "8";
-        file1.write_all(text.as_bytes()).unwrap();
-        match super::file_double(file1.path()) {
-            Ok(num) => assert_eq!(num, 16),
-            Err(err) => assert!(false),
+    fn fail_section() {
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[Globals]
+
+[no correct name]
+url         = http://tttechsvn.vie.at.tttech.ttt
+access      = svn
+variable    = SVNROOT
+layout      = tbtn
+responsible = MSF
+").unwrap();
+        let repository = from_file(file.path()).err();
+        if let Some(err) = repository {
+            assert!(err.to_string().starts_with("'configuration' section not found"));
         }
     }
 
     #[test]
-    fn file_double_parse_error() {
-        let mut file1 = NamedTempFile::new().unwrap();
-        let text = "p";
-        file1.write_all(text.as_bytes()).unwrap();
-        match super::file_double(file1.path()) {
-            Ok(n) => assert!(false),
-            Err(err) => match err {
-                super::CliError::Io(ref err) => assert!(false),
-                super::CliError::Parse(ref err) => assert!(true),
-            },
-        }
-    }
+    fn fail_key() {
 
-    #[test]
-    fn file_double_read_error() {
-        match super::file_double(Path::new("Doenotexist")) {
-            Ok(n) => assert!(false),
-            Err(err) => match err {
-                super::CliError::Io(ref err) => assert!(true),
-                super::CliError::Parse(ref err) => assert!(false),
-            },
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[Globals]
+
+[configuration]
+access      = svn
+variable    = SVNROOT
+layout      = tbtn
+responsible = MSF
+").unwrap();
+        let repository = from_file(file.path()).err();
+        if let Some(err) = repository {
+            assert!(err.to_string().starts_with("Key 'url' not found"));
         }
     }
 }
