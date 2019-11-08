@@ -4,43 +4,135 @@ use ini::{self};
 use url::{self};
 use std::error;
 use std::fmt::{self, Display};
+
 type Result<T> = std::result::Result<T, MyError>;
 
-#[derive(Debug)]
-pub enum MyError {
+pub struct MyError {
+    repr: Repr,
+}
 
-    ConfigNotFound {
-        file: PathBuf,
-    },
-    KeyNotFound {
-        key: String,
-        file: PathBuf,
-    },
-    Parse(ini::ini::Error),
-    UrlError(url::ParseError),
+impl fmt::Debug for MyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.repr, f)
+    }
 }
 
 impl fmt::Display for MyError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.repr {
+            Repr::Custom(ref c) => c.error.fmt(fmt),
+            Repr::Simple(kind) => write!(fmt, "{}", kind.as_str()),
+        }
+    }
+}
+
+enum Repr {
+    Simple(ErrorKind),
+    Custom(Box<Custom>),
+}
+
+impl fmt::Debug for Repr {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            MyError::ConfigNotFound { ref file } => write!(f, "'configuration' section not found on file {:?}", &file),
-            MyError::KeyNotFound { ref key, ref file } => write!(f, "Key '{}' not found on file {:?}", &key, &file),
-            MyError::Parse(ref err) => write!(f, "INI parse error: {}", err),
-            MyError::UrlError(ref err) => write!(f, "URL parse error: {}", err),
+            Repr::Custom(ref c) => fmt::Debug::fmt(&c, fmt),
+            Repr::Simple(kind) => fmt.debug_tuple("Kind").field(&kind).finish(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Custom {
+    kind: ErrorKind,
+    error: Box<dyn error::Error+Send+Sync>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[allow(deprecated)]
+pub enum ErrorKind {
+    ConfigNotFound,
+    KeyNotFound,
+    Parse,
+    UrlError
+}
+
+impl ErrorKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match *self {
+            ErrorKind::ConfigNotFound => "'configuration' section not found",
+            ErrorKind::KeyNotFound => "Key not found",
+            ErrorKind::Parse => "INI parse error",
+            ErrorKind::UrlError => "URL parse error",
+        }
+    }
+}
+
+impl From<ErrorKind> for MyError {
+    #[inline]
+    fn from(kind: ErrorKind) -> MyError {
+        MyError {
+            repr: Repr::Simple(kind)
+        }
+    }
+}
+
+impl MyError {
+    pub fn new<E>(kind: ErrorKind, error: E) -> MyError
+        where E: Into<Box<dyn error::Error+Send+Sync>>
+    {
+        Self::_new(kind, error.into())
+    }
+
+    fn _new(kind: ErrorKind, error: Box<dyn error::Error+Send+Sync>) -> MyError {
+        MyError {
+            repr: Repr::Custom(Box::new(Custom {
+                kind,
+                error,
+            }))
+        }
+    }
+
+    pub fn get_mut(&mut self) -> Option<&mut (dyn error::Error+Send+Sync+'static)> {
+        match self.repr {
+            Repr::Simple(..) => None,
+            Repr::Custom(ref mut c) => Some(&mut *c.error),
+        }
+    }
+
+    pub fn into_inner(self) -> Option<Box<dyn error::Error+Send+Sync>> {
+        match self.repr {
+            Repr::Simple(..) => None,
+            Repr::Custom(c) => Some(c.error)
+        }
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        match self.repr {
+            Repr::Simple(kind) => kind,
+            Repr::Custom(ref c) => c.kind,
         }
     }
 }
 
 impl error::Error for MyError {
+    fn description(&self) -> &str {
+        match self.repr {
+            Repr::Simple(..) => self.kind().as_str(),
+            Repr::Custom(ref c) => c.error.description(),
+        }
+    }
+
+    #[allow(deprecated)]
+    fn cause(&self) -> Option<&dyn error::Error> {
+        match self.repr {
+            Repr::Simple(..) => None,
+            Repr::Custom(ref c) => c.error.cause(),
+        }
+    }
+
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        match *self {
-            MyError::ConfigNotFound { ref file } => None,
-            MyError::KeyNotFound { ref key, ref file } => None,
-            // The cause is the underlying implementation error type. Is implicitly
-            // cast to the trait object `&error::Error`. This works because the
-            // underlying type already implements the `Error` trait.
-            MyError::Parse(ref e) => Some(e),
-            MyError::UrlError(ref e) => Some(e),
+        match self.repr {
+            Repr::Simple(..) => None,
+            Repr::Custom(ref c) => c.error.source(),
         }
     }
 }
@@ -50,7 +142,7 @@ impl error::Error for MyError {
 // needs to be converted into a `MyError`.
 impl From<ini::ini::Error> for MyError {
     fn from(err: ini::ini::Error) -> MyError {
-        MyError::Parse(err)
+        MyError::new(ErrorKind::Parse, err)
     }
 }
 
@@ -59,7 +151,7 @@ impl From<ini::ini::Error> for MyError {
 // needs to be converted into a `MyError`.
 impl From<url::ParseError> for MyError {
     fn from(err: url::ParseError) -> MyError {
-        MyError::UrlError(err)
+        MyError::new(ErrorKind::UrlError, err)
     }
 }
 
@@ -74,10 +166,13 @@ pub fn from_file(filepath: &Path) -> Result<Repository> {
 
     let ini_content = ini::Ini::load_from_file(filepath)?;
     let config = ini_content.section(Some("configuration"))
-        .ok_or(MyError::ConfigNotFound { file: filepath.to_owned() })?;
-    let url = config.get("url").ok_or(MyError::KeyNotFound {
-            file: filepath.to_owned(),
-            key: String::from("url")
+        .ok_or({
+            let err_str = format!("'configuration' section not found on file: {:?}", &filepath);
+            MyError::new(ErrorKind::ConfigNotFound, err_str)
+        })?;
+    let url = config.get("url").ok_or({
+            let err_str = format!("Key 'url' not found on file: {:?}", &filepath);
+            MyError::new(ErrorKind::KeyNotFound, err_str)
         })?;
     let url = url::Url::parse(url)?;
     Ok(Repository {
@@ -124,7 +219,7 @@ responsible = MSF
 ").unwrap();
         let repository = from_file(file.path()).err();
         if let Some(err) = repository {
-            assert!(err.to_string().starts_with("INI parse error: 7:0 Expecting"));
+            assert!(err.to_string().starts_with("7:0 Expecting"));
         }
     }
 
@@ -177,7 +272,7 @@ url         = tttechsvn.vie.at.tttech.ttt
 ").unwrap();
         let repository = from_file(file.path()).err();
         if let Some(err) = repository {
-            assert_eq!(err.to_string(), "URL parse error: relative URL without a base");
+            assert_eq!(err.to_string(), "relative URL without a base");
         }
     }
 }
