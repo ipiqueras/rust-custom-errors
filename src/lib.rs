@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_macros, unused_variables)]
 use std::path::{Path, PathBuf};
 use ini::{self};
+use url::{self};
 #[macro_use] extern crate failure;
 use failure::Error;
 
@@ -19,13 +20,15 @@ pub enum MyError {
     },
     #[fail(display = "ini parser error: {}", _0)]
     Parse(#[fail(cause)] ini::ini::Error),
+    #[fail(display = "url error: {}", _0)]
+    UrlError(#[fail(cause)] url::ParseError),
 }
 
 #[derive(Debug, Clone)]
 pub struct Repository {
 
     pub name: String,
-    pub url: String,
+    pub url: url::Url,
 }
 
 pub fn from_file(filepath: &Path) -> Result<Repository, Error> {
@@ -33,11 +36,14 @@ pub fn from_file(filepath: &Path) -> Result<Repository, Error> {
     let ini_content = ini::Ini::load_from_file(filepath)?;
     let config = ini_content.section(Some("configuration"))
         .ok_or(MyError::ConfigNotFound { file: filepath.to_owned() })?;
-    let url = config.get("url")
-        .ok_or(MyError::KeyNotFound { file: filepath.to_owned(), key: String::from("url") })?;
+    let url = config.get("url").ok_or(MyError::KeyNotFound {
+            file: filepath.to_owned(),
+            key: String::from("url")
+        })?;
+    let url = url::Url::parse(url)?;
     Ok(Repository {
         name: String::from("algo"),
-        url: String::from(url),
+        url,
     })
 }
 
@@ -62,7 +68,7 @@ layout      = tbtn
 responsible = MSF
 ").unwrap();
         let repository = from_file(file.path()).unwrap();
-        assert_eq!(repository.url, "http://tttechsvn.vie.at.tttech.ttt");
+        assert_eq!(repository.url.to_string(), "http://tttechsvn.vie.at.tttech.ttt/");
     }
 
     #[test]
@@ -117,6 +123,22 @@ responsible = MSF
         let repository = from_file(file.path()).err();
         if let Some(err) = repository {
             assert!(err.to_string().starts_with("Key 'url' not found"));
+        }
+    }
+
+    #[test]
+    fn fail_parse_url() {
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"[Globals]
+
+[configuration]
+url         = tttechsvn.vie.at.tttech.ttt
+
+").unwrap();
+        let repository = from_file(file.path()).err();
+        if let Some(err) = repository {
+            assert_eq!(err.to_string(), "relative URL without a base");
         }
     }
 }
