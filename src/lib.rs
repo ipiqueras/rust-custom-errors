@@ -2,26 +2,65 @@
 use std::path::{Path, PathBuf};
 use ini::{self};
 use url::{self};
-#[macro_use] extern crate failure;
-use failure::Error;
+use std::error;
+use std::fmt::{self, Display};
+type Result<T> = std::result::Result<T, MyError>;
 
-// type Result<T> = std::result::Result<T, MyError>;
-
-#[derive(Debug, Fail)]
+#[derive(Debug)]
 pub enum MyError {
-    #[fail(display = "'configuration' section not found on file: {:?}", file)]
+
     ConfigNotFound {
         file: PathBuf,
     },
-    #[fail(display = "Key '{}' not found on file: {:?}", key, file)]
     KeyNotFound {
         key: String,
         file: PathBuf,
     },
-    #[fail(display = "ini parser error: {}", _0)]
-    Parse(#[fail(cause)] ini::ini::Error),
-    #[fail(display = "url error: {}", _0)]
-    UrlError(#[fail(cause)] url::ParseError),
+    Parse(ini::ini::Error),
+    UrlError(url::ParseError),
+}
+
+impl fmt::Display for MyError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            MyError::ConfigNotFound { ref file } => write!(f, "'configuration' section not found on file {:?}", &file),
+            MyError::KeyNotFound { ref key, ref file } => write!(f, "Key '{}' not found on file {:?}", &key, &file),
+            MyError::Parse(ref err) => write!(f, "INI parse error: {}", err),
+            MyError::UrlError(ref err) => write!(f, "URL parse error: {}", err),
+        }
+    }
+}
+
+impl error::Error for MyError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match *self {
+            MyError::ConfigNotFound { ref file } => None,
+            MyError::KeyNotFound { ref key, ref file } => None,
+            // The cause is the underlying implementation error type. Is implicitly
+            // cast to the trait object `&error::Error`. This works because the
+            // underlying type already implements the `Error` trait.
+            MyError::Parse(ref e) => Some(e),
+            MyError::UrlError(ref e) => Some(e),
+        }
+    }
+}
+
+// Implement the conversion from `ini::ini::Error` to `MyError`.
+// This will be automatically called by `?` if a `ini::ini::Error`
+// needs to be converted into a `MyError`.
+impl From<ini::ini::Error> for MyError {
+    fn from(err: ini::ini::Error) -> MyError {
+        MyError::Parse(err)
+    }
+}
+
+// Implement the conversion from `url::ParseError` to `MyError`.
+// This will be automatically called by `?` if a `url::ParseError`
+// needs to be converted into a `MyError`.
+impl From<url::ParseError> for MyError {
+    fn from(err: url::ParseError) -> MyError {
+        MyError::UrlError(err)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +70,7 @@ pub struct Repository {
     pub url: url::Url,
 }
 
-pub fn from_file(filepath: &Path) -> Result<Repository, Error> {
+pub fn from_file(filepath: &Path) -> Result<Repository> {
 
     let ini_content = ini::Ini::load_from_file(filepath)?;
     let config = ini_content.section(Some("configuration"))
@@ -85,7 +124,7 @@ responsible = MSF
 ").unwrap();
         let repository = from_file(file.path()).err();
         if let Some(err) = repository {
-            assert!(err.to_string().starts_with("7:0 Expecting"));
+            assert!(err.to_string().starts_with("INI parse error: 7:0 Expecting"));
         }
     }
 
@@ -138,7 +177,7 @@ url         = tttechsvn.vie.at.tttech.ttt
 ").unwrap();
         let repository = from_file(file.path()).err();
         if let Some(err) = repository {
-            assert_eq!(err.to_string(), "relative URL without a base");
+            assert_eq!(err.to_string(), "URL parse error: relative URL without a base");
         }
     }
 }

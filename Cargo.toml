@@ -8,7 +8,6 @@ edition = "2018"
 
 [dependencies]
 rust-ini = "0.13"
-failure = "0.1.6"
 url = "2.1"
 
 [dev-dependencies]
